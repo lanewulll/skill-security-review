@@ -1,0 +1,42 @@
+#!/usr/bin/env sh
+set -eu
+
+if [ "${1:-}" = "" ]; then
+  echo "usage: skill-security-review scan <target> [options]" >&2
+  exit 64
+fi
+
+PYTHON_BIN="${PYTHON:-}"
+if [ -z "$PYTHON_BIN" ]; then
+  if [ -n "${SKILL_SECURITY_REVIEW_REPO:-}" ] && [ -x "$SKILL_SECURITY_REVIEW_REPO/.venv/bin/python" ]; then
+    PYTHON_BIN="$SKILL_SECURITY_REVIEW_REPO/.venv/bin/python"
+  elif [ -x ".venv/bin/python" ]; then
+    PYTHON_BIN=".venv/bin/python"
+  elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+  elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+  fi
+fi
+
+if [ -z "$PYTHON_BIN" ]; then
+  echo "python3 or python is required to run the local skill-security-review repository." >&2
+  exit 127
+fi
+
+if [ -n "${SKILL_SECURITY_REVIEW_REPO:-}" ] && [ -f "$SKILL_SECURITY_REVIEW_REPO/app/cli.py" ]; then
+  cd "$SKILL_SECURITY_REVIEW_REPO"
+  exec "$PYTHON_BIN" -m app.cli "$@"
+fi
+
+if [ -f "app/cli.py" ]; then
+  exec "$PYTHON_BIN" -m app.cli "$@"
+fi
+
+if command -v skill-security-review >/dev/null 2>&1; then
+  exec skill-security-review "$@"
+fi
+
+echo "skill-security-review CLI not found." >&2
+echo "Set SKILL_SECURITY_REVIEW_REPO to a local/private checkout containing app/cli.py, run from that checkout root, or install the CLI on PATH." >&2
+exit 127
