@@ -16,12 +16,25 @@ git clone https://github.com/lanewulll/skill-security-review.git ~/.codex/skills
 ./scripts/skill-security-review scan /path/to/skill --out skill-review-output
 ```
 
+验证发布运行时：
+
+```bash
+scripts/verify-runtime
+```
+
+`assets/skill-security-review.pyz` 是由开发仓库中的 standalone runtime 构建出的 Python zipapp。发布包只包含运行载荷，不包含完整开发源码；zipapp 内部文件使用固定时间戳，便于重复构建后比较哈希。
+
 ## 使用
+
+每次通过 Agent 使用本 skill 扫描前，应先选择审查模式：
+
+- **弱审查**：只运行静态规则扫描，不启动 Docker，不执行目标包代码。
+- **强审查**：静态规则 + Docker 动态沙箱审查，需要本机 Docker 和审计镜像 `skill-review-audit:local`。
 
 扫描目录：
 
 ```bash
-scripts/skill-security-review scan /path/to/skill --out skill-review-output
+scripts/skill-security-review scan /path/to/skill --review-level weak --out skill-review-output
 ```
 
 扫描 zip：
@@ -33,7 +46,8 @@ scripts/skill-security-review scan /path/to/skill.zip --out skill-review-output
 只输出 JSON，便于 Agent 读取：
 
 ```bash
-scripts/skill-security-review scan /path/to/skill --dynamic-mode off --json-only
+scripts/skill-security-review scan /path/to/skill --review-level weak --json-only
+scripts/skill-security-review scan /path/to/skill --review-level strong --json-only
 ```
 
 CI 中按风险等级失败：
@@ -57,13 +71,21 @@ scripts/skill-security-review scan /path/to/skill --fail-on high
 
 ## 动态审查
 
-公开版为了让别人安装后立刻能独立扫描，默认不执行不受信任代码，也不要求 Docker、API key、baseURL 或模型配置。
+弱审查默认不执行不受信任代码，也不要求 Docker、API key、baseURL 或模型配置。
 
-`--dynamic-mode auto|trace|conservative-agent` 会在报告中记录动态审查降级原因；基础审查不会因此阻断。需要真正 Docker 沙箱执行时，应在私有完整版或后续增强版中扩展。
+强审查使用 Docker 沙箱执行受控动态探测。首次使用前可在 skill 根目录构建审计镜像：
+
+```bash
+docker build -f docker/audit-sandbox.Dockerfile -t skill-review-audit:local .
+```
+
+如果 Docker CLI、Docker daemon 或 `skill-review-audit:local` 镜像不可用，强审查不会阻断静态扫描；报告会明确写出动态审查降级原因。
+
+兼容旧脚本：`--dynamic-mode off|auto|trace|conservative-agent` 仍然可用。传入 `--review-level weak|strong` 时，`--review-level` 优先。
 
 ## 源码展示边界
 
-公开仓库只展示 skill 结构、README、Agent 元数据、启动脚本和 `assets/skill-security-review.pyz` 运行载荷，避免把完整源码目录直接摊开。
+公开仓库只展示 skill 结构、README、Agent 元数据、启动脚本、Docker 审计镜像定义和 `assets/skill-security-review.pyz` 运行载荷，避免把完整源码目录直接摊开。
 
 注意：`.pyz` 是可运行的 Python zipapp，不是加密或 DRM。它能减少源码外显，但不能作为商业闭源保护。
 

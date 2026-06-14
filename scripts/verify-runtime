@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+RUNTIME = ROOT / "assets" / "skill-security-review.pyz"
+EXPECTED_ENTRIES = {
+    "__main__.py",
+    "rules_snapshot.py",
+}
+EXPECTED_TIMESTAMP = (2020, 1, 1, 0, 0, 0)
+
+
+def main() -> int:
+    if not RUNTIME.is_file():
+        print(f"missing runtime: {RUNTIME}", file=sys.stderr)
+        return 1
+    if not zipfile.is_zipfile(RUNTIME):
+        print(f"runtime is not a valid zipapp: {RUNTIME}", file=sys.stderr)
+        return 1
+    with zipfile.ZipFile(RUNTIME) as archive:
+        entries = {info.filename for info in archive.infolist()}
+        if entries != EXPECTED_ENTRIES:
+            print(f"unexpected runtime entries: {sorted(entries)}", file=sys.stderr)
+            return 1
+        stale_timestamps = [
+            info.filename
+            for info in archive.infolist()
+            if info.date_time != EXPECTED_TIMESTAMP
+        ]
+        if stale_timestamps:
+            print(f"non-deterministic runtime timestamps: {stale_timestamps}", file=sys.stderr)
+            return 1
+    result = subprocess.run(
+        [sys.executable, str(RUNTIME), "--help"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        print(result.stderr, file=sys.stderr)
+        return result.returncode
+    if "skill-security-review" not in result.stdout or "scan" not in result.stdout:
+        print("runtime help output did not include expected CLI text", file=sys.stderr)
+        return 1
+    print("runtime verification passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

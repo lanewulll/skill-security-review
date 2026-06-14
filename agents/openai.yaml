@@ -1,4 +1,4 @@
 interface:
   display_name: "Skill Security Review"
   short_description: "Audit local Codex or agent skill packages"
-  default_prompt: "Use $skill-security-review to scan a local skill directory or zip, then summarize report.md and report.json with highest-risk findings first."
+  default_prompt: "Use $skill-security-review to ask whether this scan should use weak review or strong review, scan the local skill directory or zip with the bundled CLI, then summarize report.md and report.json with highest-risk findings first."
