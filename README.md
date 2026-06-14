@@ -35,6 +35,8 @@ Agent 工作流建议：
 - 如果用户给出本地目录或 `.zip` 路径，直接运行弱审查。
 - 如果用户没有给出路径，先询问要审查的 skill 位置。
 - 如果用户明确要求“强审查”“动态审查”或“Docker 沙箱”，运行强审查。
+- 强审查必须真的运行 Docker 沙箱；如果 Docker 不可用，工具会尝试唤醒 Docker Desktop，仍不可用时直接失败。
+- 强审查失败时，Agent 应询问用户是安装/启动 Docker 后重试，还是改用弱审查。
 - 如果弱审查发现 high 或 critical 风险，在总结报告后建议用户升级到强审查。
 - 如果 Agent 负责安装 skill，建议在启用前自动运行弱审查；发现 high 或 critical 风险时，先展示报告并等待用户确认。
 
@@ -163,6 +165,8 @@ scripts/install-reviewed-skill /path/to/skill <codex-skills-dir> --review-level 
 
 弱审查适合日常审查、CI 快速检查和不可信包的初步筛查。强审查适合发布前复核或需要观察运行行为的场景。
 
+强审查采用 fail-closed 语义：如果 Docker CLI、Docker daemon 或审计镜像不可用，强审查不会降级成弱审查并返回成功。wrapper 会先尝试唤醒 Docker Desktop；如果仍不可用，会以非零退出码失败，并提示用户安装/启动 Docker 后重试，或显式切换为弱审查。
+
 ## Docker Sandbox
 
 强审查需要先构建本地审计镜像：
@@ -177,7 +181,7 @@ docker build -f docker/audit-sandbox.Dockerfile -t skill-review-audit:local .
 scripts/skill-security-review scan /path/to/skill --review-level strong --out skill-review-output
 ```
 
-如果 Docker CLI、Docker daemon 或审计镜像不可用，工具会保留静态扫描结果，并在报告中写明动态审查降级原因。
+如果 Docker CLI、Docker daemon 或审计镜像不可用，强审查会失败退出。请启动或安装 Docker、构建审计镜像后重试；如果你接受只做静态检查，请显式改用 `--review-level weak`。
 
 兼容旧参数：`--dynamic-mode off|auto|trace|conservative-agent` 仍可使用。传入 `--review-level weak|strong` 时，以 `--review-level` 为准。
 

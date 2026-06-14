@@ -9,6 +9,68 @@ fi
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 SKILL_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 RUNTIME="$SKILL_ROOT/assets/skill-security-review.pyz"
+AUDIT_IMAGE="${SKILL_REVIEW_AUDIT_IMAGE:-skill-review-audit:local}"
+DOCKER_WAIT_SECONDS="${SKILL_REVIEW_DOCKER_WAIT_SECONDS:-30}"
+
+requires_strong_review() {
+  prev=""
+  for arg in "$@"; do
+    if [ "$arg" = "--review-level=strong" ]; then
+      return 0
+    fi
+    if [ "$prev" = "--review-level" ] && [ "$arg" = "strong" ]; then
+      return 0
+    fi
+    prev="$arg"
+  done
+  return 1
+}
+
+docker_ready() {
+  command -v docker >/dev/null 2>&1 || return 1
+  docker info >/dev/null 2>&1 || return 1
+  docker image inspect "$AUDIT_IMAGE" >/dev/null 2>&1 || return 1
+}
+
+try_wake_docker() {
+  command -v docker >/dev/null 2>&1 || return 1
+  if docker info >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v open >/dev/null 2>&1; then
+    open -a Docker >/dev/null 2>&1 || true
+  fi
+  waited=0
+  while [ "$waited" -lt "$DOCKER_WAIT_SECONDS" ]; do
+    if docker info >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 1
+}
+
+fail_strong_review_docker() {
+  echo "Strong review requires Docker, but the Docker sandbox is not ready." >&2
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "Docker CLI was not found. Install Docker Desktop, then retry strong review." >&2
+    echo "If you do not want to install Docker now, rerun with --review-level weak." >&2
+    return 78
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    echo "Docker daemon is unavailable. I tried to wake Docker Desktop with 'open -a Docker', but it is still not ready." >&2
+    echo "Start Docker Desktop and retry, install Docker if it is not installed, or rerun with --review-level weak." >&2
+    return 78
+  fi
+  if ! docker image inspect "$AUDIT_IMAGE" >/dev/null 2>&1; then
+    echo "Docker is running, but audit image '$AUDIT_IMAGE' is missing." >&2
+    echo "Build it with: docker build -f docker/audit-sandbox.Dockerfile -t $AUDIT_IMAGE ." >&2
+    echo "Then retry strong review, or rerun with --review-level weak." >&2
+    return 78
+  fi
+  return 78
+}
 
 PYTHON_BIN="${PYTHON:-}"
 if [ -z "$PYTHON_BIN" ]; then
@@ -28,6 +90,16 @@ if [ ! -f "$RUNTIME" ]; then
   echo "Bundled runtime not found: $RUNTIME" >&2
   echo "Reinstall this skill from a complete release containing assets/skill-security-review.pyz." >&2
   exit 127
+fi
+
+if requires_strong_review "$@"; then
+  if ! docker_ready; then
+    try_wake_docker || true
+  fi
+  if ! docker_ready; then
+    fail_strong_review_docker
+    exit $?
+  fi
 fi
 
 exec "$PYTHON_BIN" "$RUNTIME" "$@"
