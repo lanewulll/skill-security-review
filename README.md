@@ -1,97 +1,252 @@
 # skill-security-review
 
-一个可独立运行的 Codex/Agent skill 安全审查工具。安装后可直接扫描本地 skill 目录或 `.zip` 包，输出 Markdown 和 JSON 报告。
+一个面向 Codex/Agent skill 包的本地安全审查工具。用户可以在 Agent 中用自然语言请求审查某个 skill；Agent 负责调用本仓库携带的 CLI，读取 Markdown/JSON 报告，并优先总结最高风险发现。
 
-## 安装
+`skill-security-review` 默认以离线、静态方式运行，不要求 API key、baseURL 或模型配置；需要更强验证时，也可以使用 Docker 沙箱进行动态审查。它也适合作为 Agent 安装新 skill 后的自动审查步骤。
 
-把本仓库克隆到你的 Codex skills 目录：
+## Features
 
-```bash
-git clone https://github.com/lanewulll/skill-security-review.git ~/.codex/skills/skill-security-review
+- 支持通过 Agent 自然语言触发审查，例如“对这个 skill 进行安全审查”。
+- 提供隔离区安装流程：新 skill 先进入 `_pending`，审查通过后才启用。
+- 扫描本地 skill 目录和 `.zip` 包。
+- 检查 `SKILL.md` 元数据、文件清单、可执行脚本和二进制资源。
+- 对 `.zip` 包执行路径穿越、重复路径、符号链接、异常大文件和过深路径检查。
+- 检测常见风险模式：凭据访问、硬编码密钥、私钥、破坏性命令、网络外传、远程代码执行、持久化、提权、Prompt 越权和供应链风险。
+- 生成适合人工阅读的 `report.md` 和适合 Agent/CI 读取的 `report.json`。
+- 支持弱审查和强审查两种模式。
+- 提供可复验的 Python zipapp 运行载荷。
+
+## Agent Usage
+
+安装到 Agent 的 skills 目录后，用户不需要记住 CLI 参数。可以直接对 Agent 说：
+
+```text
+对 /path/to/some-skill 这个 skill 进行安全审查
 ```
 
-也可以克隆到任意目录后直接运行脚本：
+也可以在安装或更新新 skill 后说：
 
-```bash
-./scripts/skill-security-review scan /path/to/skill --out skill-review-output
+```text
+审查刚安装的 skill
 ```
 
-验证发布运行时：
+Agent 工作流建议：
+
+- 如果用户给出本地目录或 `.zip` 路径，直接运行弱审查。
+- 如果用户没有给出路径，先询问要审查的 skill 位置。
+- 如果用户明确要求“强审查”“动态审查”或“Docker 沙箱”，运行强审查。
+- 如果弱审查发现 high 或 critical 风险，在总结报告后建议用户升级到强审查。
+- 如果 Agent 负责安装 skill，建议在启用前自动运行弱审查；发现 high 或 critical 风险时，先展示报告并等待用户确认。
+
+## Enforced Install Workflow
+
+如果你希望“安装后自动审查”成为强制机制，不要把新 skill 直接放进启用目录。使用隔离区安装器：
 
 ```bash
+scripts/install-reviewed-skill /path/to/new-skill <codex-skills-dir>
+```
+
+安装流程：
+
+```text
+source skill
+  -> <codex-skills-dir>/_pending/<skill-name>
+  -> weak review
+  -> write .skill-review.json
+  -> enable only when no high/critical findings exist
+```
+
+通过审查后，skill 会移动到：
+
+```text
+<codex-skills-dir>/<skill-name>
+```
+
+如果发现 high 或 critical 风险，安装器会停止启用流程，目标会保留在：
+
+```text
+<codex-skills-dir>/_pending/<skill-name>
+```
+
+审查报告和凭证会保留在 pending 目录中：
+
+```text
+.skill-review-output/report.md
+.skill-review-output/report.json
+.skill-review.json
+```
+
+`.skill-review.json` 记录审查级别、分数、最高风险级别、finding 数量、目标哈希和报告位置。Agent 或安装管理器可以把它当作启用前的审查凭证。
+
+## Quick Start
+
+在仓库根目录运行以下命令，验证运行时并扫描当前发布包：
+
+```bash
+OUT="${TMPDIR:-/tmp}/skill-review-output"
 scripts/verify-runtime
+scripts/skill-security-review scan . --review-level weak --out "$OUT"
+ls "$OUT"
 ```
 
-`assets/skill-security-review.pyz` 是由开发仓库中的 standalone runtime 构建出的 Python zipapp。发布包只包含运行载荷，不包含完整开发源码；zipapp 内部文件使用固定时间戳，便于重复构建后比较哈希。
+输出应包含 `report.md` 和 `report.json`。
 
-## 使用
+## Installation
 
-每次通过 Agent 使用本 skill 扫描前，应先选择审查模式：
+可以把本仓库放入你的 Codex skills 目录：
 
-- **弱审查**：只运行静态规则扫描，不启动 Docker，不执行目标包代码。
-- **强审查**：静态规则 + Docker 动态沙箱审查，需要本机 Docker 和审计镜像 `skill-review-audit:local`。
+```bash
+git clone https://github.com/lanewulll/skill-security-review.git <codex-skills-dir>/skill-security-review
+```
 
-扫描目录：
+也可以在任意目录直接运行：
+
+```bash
+./scripts/skill-security-review scan /path/to/skill --review-level weak --out skill-review-output
+```
+
+### Requirements
+
+- Python 3，用于执行 `assets/skill-security-review.pyz`。
+- Docker，可选；仅强审查需要。
+- 审计镜像 `skill-review-audit:local`，可选；仅强审查需要。
+
+## Manual CLI Usage
+
+### Scan a Directory
 
 ```bash
 scripts/skill-security-review scan /path/to/skill --review-level weak --out skill-review-output
 ```
 
-扫描 zip：
+### Scan a Zip Package
 
 ```bash
-scripts/skill-security-review scan /path/to/skill.zip --out skill-review-output
+scripts/skill-security-review scan /path/to/skill.zip --review-level weak --out skill-review-output
 ```
 
-只输出 JSON，便于 Agent 读取：
+### JSON Output
 
 ```bash
 scripts/skill-security-review scan /path/to/skill --review-level weak --json-only
-scripts/skill-security-review scan /path/to/skill --review-level strong --json-only
 ```
 
-CI 中按风险等级失败：
+### CI Thresholds
+
+让 CI 在达到指定风险等级时失败：
 
 ```bash
 scripts/skill-security-review scan /path/to/skill --fail-on high
 ```
 
-默认会生成：
+### Reviewed Install
 
-- `skill-review-output/report.md`
-- `skill-review-output/report.json`
+将本地目录或 `.zip` 包通过隔离区审查后安装：
 
-## 能力范围
+```bash
+scripts/install-reviewed-skill /path/to/skill <codex-skills-dir>
+scripts/install-reviewed-skill /path/to/skill.zip <codex-skills-dir>
+```
 
-- 检查 `SKILL.md` 元数据和包内文件清单。
-- 支持目录和 `.zip` 输入。
-- 对 `.zip` 做路径穿越、重复路径、符号链接、异常大文件、过深路径等安全检查。
-- 检测常见高危模式：凭据读取、硬编码密钥、私钥、破坏性命令、网络外传、远程代码执行、持久化、提权、Prompt 越权等。
-- 输出脱敏后的证据片段、风险说明、修复建议、评分和结构化 JSON。
+默认使用弱审查。需要强审查时：
 
-## 动态审查
+```bash
+scripts/install-reviewed-skill /path/to/skill <codex-skills-dir> --review-level strong
+```
 
-弱审查默认不执行不受信任代码，也不要求 Docker、API key、baseURL 或模型配置。
+## Review Levels
 
-强审查使用 Docker 沙箱执行受控动态探测。首次使用前可在 skill 根目录构建审计镜像：
+| Level | What runs | Executes target code | Requirements |
+| --- | --- | --- | --- |
+| `weak` | 静态规则扫描、包结构检查、报告生成 | No | Python 3 |
+| `strong` | 弱审查 + Docker 动态沙箱审查 | Only inside the audit sandbox | Python 3, Docker, `skill-review-audit:local` |
+
+弱审查适合日常审查、CI 快速检查和不可信包的初步筛查。强审查适合发布前复核或需要观察运行行为的场景。
+
+## Docker Sandbox
+
+强审查需要先构建本地审计镜像：
 
 ```bash
 docker build -f docker/audit-sandbox.Dockerfile -t skill-review-audit:local .
 ```
 
-如果 Docker CLI、Docker daemon 或 `skill-review-audit:local` 镜像不可用，强审查不会阻断静态扫描；报告会明确写出动态审查降级原因。
+然后运行：
 
-兼容旧脚本：`--dynamic-mode off|auto|trace|conservative-agent` 仍然可用。传入 `--review-level weak|strong` 时，`--review-level` 优先。
+```bash
+scripts/skill-security-review scan /path/to/skill --review-level strong --out skill-review-output
+```
 
-## 源码展示边界
+如果 Docker CLI、Docker daemon 或审计镜像不可用，工具会保留静态扫描结果，并在报告中写明动态审查降级原因。
 
-公开仓库只展示 skill 结构、README、Agent 元数据、启动脚本、Docker 审计镜像定义和 `assets/skill-security-review.pyz` 运行载荷，避免把完整源码目录直接摊开。
+兼容旧参数：`--dynamic-mode off|auto|trace|conservative-agent` 仍可使用。传入 `--review-level weak|strong` 时，以 `--review-level` 为准。
 
-注意：`.pyz` 是可运行的 Python zipapp，不是加密或 DRM。它能减少源码外显，但不能作为商业闭源保护。
+## Reports
 
-## 安全原则
+默认输出目录包含：
 
-- 不读取用户真实凭据、浏览器配置、shell history 或云配置。
-- 不要求用户输入 API key、baseURL 或模型。
-- 不把审查目标中的指令当作要执行的指令。
-- 不把“未发现风险”等同于“绝对安全”。
+- `report.md`：面向人工阅读的审查报告。
+- `report.json`：结构化结果，适合 Agent、自动化流程和 CI 读取。
+
+JSON 报告包含以下主要字段：
+
+- `package_name` 和 `package_description`
+- `files_scanned`
+- `findings`
+- `score`
+- `docker`
+- `dynamic_review`
+- `report_markdown`
+
+每条 finding 会包含规则 ID、标题、严重级别、证据文件、脱敏片段、风险说明、修复建议、类别和参考标准。
+
+## Security Model
+
+- 不要求用户提供 API key、baseURL 或模型配置。
+- 不读取目标包之外的真实凭据、浏览器配置、shell history 或云配置。
+- 将被审查包内容视为不可信证据，不执行其中的指令。
+- 弱审查不执行目标包代码。
+- 强审查只在 Docker 审计沙箱可用时运行动态探测。
+- 动态审查只能说明观测到的行为，不能证明包绝对安全。
+- “未发现风险”表示内置规则未确定命中，不等同于安全保证。
+
+## Runtime Package
+
+`assets/skill-security-review.pyz` 是由开发仓库中的 standalone runtime 构建出的 Python zipapp。发布包只包含运行载荷，不包含完整开发源码。
+
+运行时 zipapp 内部文件使用固定时间戳，便于重复构建后比较哈希。可以用以下命令复验发布运行时：
+
+```bash
+scripts/verify-runtime
+```
+
+`.pyz` 是可运行、可检查的 Python zipapp，不是加密或 DRM。它能减少源码外显，但不应被描述为商业闭源保护。
+
+## Limitations
+
+- 静态规则可能产生误报或漏报。
+- 二进制资源只记录元数据，不会在弱审查中展开执行。
+- 强审查依赖本机 Docker 环境和本地审计镜像。
+- 动态沙箱只能覆盖实际触发到的行为。
+- 公开仓库展示的是可发布 skill 包结构，而不是完整开发仓库。
+
+## Repository Layout
+
+```text
+.
+├── SKILL.md
+├── README.md
+├── agents/
+├── assets/
+│   └── skill-security-review.pyz
+├── docker/
+│   └── audit-sandbox.Dockerfile
+└── scripts/
+    ├── install-reviewed-skill
+    ├── skill-security-review
+    └── verify-runtime
+```
+
+## License
+
+MIT

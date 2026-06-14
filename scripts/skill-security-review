@@ -26,7 +26,7 @@ fi
 
 if [ ! -f "$RUNTIME" ]; then
   echo "Bundled runtime not found: $RUNTIME" >&2
-  echo "Reinstall this skill or download a complete release containing assets/skill-security-review.pyz." >&2
+  echo "Reinstall this skill from a complete release containing assets/skill-security-review.pyz." >&2
   exit 127
 fi
 

@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+REVIEW_CLI = ROOT / "scripts" / "skill-security-review"
+BLOCKING_SEVERITIES = {"critical", "high"}
+SEVERITY_ORDER = {
+    "critical": 5,
+    "high": 4,
+    "medium": 3,
+    "low": 2,
+    "info": 1,
+    "none": 0,
+}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Install a skill through a pending review gate before enabling it."
+    )
+    parser.add_argument("source", help="Skill directory or .zip package to install")
+    parser.add_argument("skills_dir", help="Destination skills directory")
+    parser.add_argument("--name", help="Installed skill directory name")
+    parser.add_argument(
+        "--review-level",
+        choices=("weak", "strong"),
+        default="weak",
+        help="Review level to run before enabling the skill",
+    )
+    return parser.parse_args()
+
+
+def skill_name(source: Path, explicit_name: str | None) -> str:
+    name = explicit_name or (source.stem if source.suffix.lower() == ".zip" else source.name)
+    if not name or name in {".", ".."} or "/" in name or "\\" in name:
+        raise ValueError(f"invalid skill name: {name!r}")
+    return name
+
+
+def is_zip_symlink(info: zipfile.ZipInfo) -> bool:
+    return ((info.external_attr >> 16) & 0o170000) == 0o120000
+
+
+def extract_zip_safely(source: Path, destination: Path) -> None:
+    with zipfile.ZipFile(source) as archive:
+        for info in archive.infolist():
+            if is_zip_symlink(info):
+                raise ValueError(f"zip contains a symbolic link: {info.filename}")
+            target = (destination / info.filename).resolve()
+            if not str(target).startswith(str(destination.resolve()) + os.sep):
+                raise ValueError(f"zip entry escapes destination: {info.filename}")
+        archive.extractall(destination)
+
+
+def stage_source(source: Path, pending: Path) -> None:
+    if source.is_dir():
+        shutil.copytree(source, pending, symlinks=True)
+        return
+    if source.is_file() and source.suffix.lower() == ".zip":
+        pending.mkdir(parents=True)
+        extract_zip_safely(source, pending)
+        return
+    raise ValueError("source must be a skill directory or .zip package")
+
+
+def hash_tree(path: Path) -> str:
+    digest = hashlib.sha256()
+    for item in sorted(path.rglob("*")):
+        relative = item.relative_to(path).as_posix()
+        digest.update(relative.encode("utf-8"))
+        if item.is_symlink():
+            digest.update(b"\0symlink\0")
+            digest.update(os.readlink(item).encode("utf-8"))
+        elif item.is_file():
+            digest.update(b"\0file\0")
+            digest.update(item.read_bytes())
+        elif item.is_dir():
+            digest.update(b"\0dir\0")
+    return digest.hexdigest()
+
+
+def run_review(target: Path, output_dir: Path, review_level: str) -> dict:
+    result = subprocess.run(
+        [
+            str(REVIEW_CLI),
+            "scan",
+            str(target),
+            "--review-level",
+            review_level,
+            "--out",
+            str(output_dir),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr or result.stdout or "review command failed")
+    report_path = output_dir / "report.json"
+    if not report_path.is_file():
+        raise RuntimeError(f"review report was not created: {report_path}")
+    return json.loads(report_path.read_text(encoding="utf-8"))
+
+
+def highest_severity(report: dict) -> str:
+    findings = report.get("findings") or []
+    highest = "none"
+    for finding in findings:
+        severity = str(finding.get("severity", "none")).lower()
+        if SEVERITY_ORDER.get(severity, 0) > SEVERITY_ORDER[highest]:
+            highest = severity
+    return highest
+
+
+def write_attestation(
+    pending: Path,
+    source: Path,
+    skills_dir: Path,
+    review_level: str,
+    target_hash: str,
+    report: dict,
+) -> None:
+    findings = report.get("findings") or []
+    score = report.get("score") or {}
+    attestation = {
+        "reviewed_by": "skill-security-review",
+        "review_level": review_level,
+        "reviewed_at": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+        "source": str(source),
+        "skills_dir": str(skills_dir),
+        "target_hash": target_hash,
+        "score": score.get("score"),
+        "risk_band": score.get("band"),
+        "highest_severity": highest_severity(report),
+        "findings_count": len(findings),
+        "report_dir": ".skill-review-output",
+    }
+    (pending / ".skill-review.json").write_text(
+        json.dumps(attestation, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def main() -> int:
+    args = parse_args()
+    source = Path(args.source).expanduser().resolve()
+    skills_dir = Path(args.skills_dir).expanduser().resolve()
+    name = skill_name(source, args.name)
+    pending_root = skills_dir / "_pending"
+    pending = pending_root / name
+    enabled = skills_dir / name
+
+    if not source.exists():
+        print(f"source not found: {source}", file=sys.stderr)
+        return 2
+    if pending.exists():
+        print(f"pending skill already exists: {pending}", file=sys.stderr)
+        return 2
+    if enabled.exists():
+        print(f"enabled skill already exists: {enabled}", file=sys.stderr)
+        return 2
+
+    try:
+        pending_root.mkdir(parents=True, exist_ok=True)
+        stage_source(source, pending)
+        target_hash = hash_tree(pending)
+        report_dir = pending / ".skill-review-output"
+        review_target = source if source.is_file() and source.suffix.lower() == ".zip" else pending
+        report = run_review(review_target, report_dir, args.review_level)
+        severity = highest_severity(report)
+        write_attestation(pending, source, skills_dir, args.review_level, target_hash, report)
+        if severity in BLOCKING_SEVERITIES:
+            print(
+                f"review blocked enabling {name}: highest severity is {severity}. "
+                f"Review output remains in {report_dir}",
+                file=sys.stderr,
+            )
+            return 3
+        os.replace(pending, enabled)
+    except Exception as exc:
+        print(f"install-reviewed-skill failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Installed reviewed skill: {enabled}")
+    print(f"Review attestation: {enabled / '.skill-review.json'}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
