@@ -13,6 +13,7 @@
 - 对 `.zip` 包执行路径穿越、重复路径、符号链接、异常大文件和过深路径检查。
 - 检测常见风险模式：凭据访问、硬编码密钥、私钥、破坏性命令、网络外传、远程代码执行、持久化、提权、Prompt 越权和供应链风险。
 - 内置 40 条 Gitleaks-derived provider token 规则，用于补强 OpenAI、Anthropic、GitHub、GitLab、npm、PyPI、Slack、Stripe、Vault 等高价值凭据格式检测；这些规则在本地运行，不调用外部 `gitleaks` 二进制。
+- 强审查通过 Docker/strace 生成结构化动态遥测，覆盖凭据诱饵访问、网络尝试、诱饵外传、环境变量枚举、持久化写入、Agent 配置修改、工作区越界写、危险进程、提权、包管理器副作用、沙箱逃逸探测和资源滥用 12 类行为。
 - 生成适合人工阅读的 `report.md` 和适合 Agent/CI 读取的 `report.json`。
 - 支持弱审查和强审查两种模式。
 - 提供可复验的 Python zipapp 运行载荷。
@@ -162,11 +163,20 @@ scripts/install-reviewed-skill /path/to/skill <codex-skills-dir> --review-level 
 | Level | What runs | Executes target code | Requirements |
 | --- | --- | --- | --- |
 | `weak` | 静态规则扫描、包结构检查、报告生成 | No | Python 3 |
-| `strong` | 弱审查 + Docker 动态沙箱审查 | Only inside the audit sandbox | Python 3, Docker, `skill-review-audit:local` |
+| `strong` | 弱审查 + Docker/strace 动态沙箱审查 | Only inside the audit sandbox | Python 3, Docker, `skill-review-audit:local` |
 
 弱审查适合日常审查、CI 快速检查和不可信包的初步筛查。强审查适合发布前复核或需要观察运行行为的场景。
 
 强审查采用 fail-closed 语义：如果 Docker CLI、Docker daemon 或审计镜像不可用，强审查不会降级成弱审查并返回成功。wrapper 会先尝试唤醒 Docker Desktop；如果仍不可用，会以非零退出码失败，并提示用户安装/启动 Docker 后重试，或显式切换为弱审查。
+
+强审查会在 Docker 沙箱中对每个 probe 运行 `strace`，捕获文件、进程和网络 syscall，并把结构化摘要写入动态报告字段：
+
+- `dynamic_review.events`：脱敏后的事件摘要，包含 `signals`。
+- `dynamic_review.violations`：从动态遥测派生出的违规。
+- `dynamic_review.telemetry_files`：Docker `/workspace` 中逻辑遥测文件摘要。
+- `dynamic_review.rule_counts`：动态规则命中计数。
+
+动态规则覆盖 12 类行为：凭据诱饵访问、网络尝试、诱饵凭据外传、环境变量枚举、持久化写入、Codex/Claude/MCP/Cursor/VS Code 等 Agent 配置修改、工作区边界外写入、危险进程或命令模式、提权尝试、包管理器副作用、沙箱逃逸探测和资源滥用。动态审查是观察式检查：它能报告 probe 实际触发到的行为，不能证明未触发或不可达代码路径绝对安全。
 
 ## Docker Sandbox
 
